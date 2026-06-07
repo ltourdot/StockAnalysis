@@ -3,8 +3,11 @@ import { useState, useCallback } from 'react';
 import { SEC_EXTRACTION_PROMPT, ANALYSIS_PROMPT } from '../lib/prompts';
 import { fetchAllMarketData } from '../lib/apiClients';
 
-const ANTHROPIC_KEY = process.env.REACT_APP_ANTHROPIC_API_KEY;
 const MODEL = 'claude-sonnet-4-20250514';
+
+function getKey() {
+  return localStorage.getItem('anthropic_api_key') || '';
+}
 
 function parseClaudeJSON(data) {
   const text = (data.content || [])
@@ -13,7 +16,6 @@ function parseClaudeJSON(data) {
     .join('')
     .trim();
   const clean = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-  // Find the first { and last } to extract JSON even if there's surrounding text
   const start = clean.indexOf('{');
   const end = clean.lastIndexOf('}');
   if (start === -1 || end === -1) throw new Error('No JSON found in response');
@@ -21,9 +23,8 @@ function parseClaudeJSON(data) {
 }
 
 async function callClaude({ system, userContent, tools, maxTokens = 4000 }) {
-  if (!ANTHROPIC_KEY || ANTHROPIC_KEY === 'your_anthropic_api_key_here') {
-    throw new Error('Anthropic API key not configured. Add REACT_APP_ANTHROPIC_API_KEY in Vercel → Project Settings → Environment Variables, then redeploy.');
-  }
+  const key = getKey();
+  if (!key) throw new Error('NO_KEY');
 
   const body = {
     model: MODEL,
@@ -37,7 +38,7 @@ async function callClaude({ system, userContent, tools, maxTokens = 4000 }) {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-api-key': ANTHROPIC_KEY,
+      'x-api-key': key,
       'anthropic-version': '2023-06-01',
       'anthropic-dangerous-direct-browser-access': 'true',
     },
@@ -46,11 +47,11 @@ async function callClaude({ system, userContent, tools, maxTokens = 4000 }) {
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    const msg = err.error?.message || `API error ${res.status}`;
-    if (res.status === 401) throw new Error('Invalid API key. Check your REACT_APP_ANTHROPIC_API_KEY in Vercel environment variables.');
-    if (res.status === 403) throw new Error('API key lacks permission. Make sure you have credits at console.anthropic.com.');
-    if (res.status === 529) throw new Error('Anthropic API overloaded. Wait 30 seconds and try again.');
-    throw new Error(msg);
+    const msg = err.error?.message || '';
+    if (res.status === 401) throw new Error('Invalid API key. Double-check the key and try again.');
+    if (res.status === 403) throw new Error('API key needs credits. Add funds at console.anthropic.com.');
+    if (res.status === 529) throw new Error('Anthropic is overloaded. Wait 30 seconds and try again.');
+    throw new Error(msg || `API error ${res.status}`);
   }
   return res.json();
 }
@@ -63,7 +64,6 @@ function mergeMarketData(extracted, marketData) {
   const bs = merged.balance_sheet || {};
   const cf = merged.cash_flow || {};
   const md = merged.market_data || {};
-
   merged.income_statement = {
     revenue: is.revenue ?? fmp.revenue,
     revenue_1yr_ago: is.revenue_1yr_ago ?? fmp.revenue1YrAgo,
@@ -142,35 +142,29 @@ export function useAnalysis() {
           r.onerror = () => rej(new Error('File read failed'));
           r.readAsDataURL(file);
         });
-
-        setStep(2, 'Extracting financial data from document...');
+        setStep(2, 'Extracting financial data...');
         const extractData = await callClaude({
           system: SEC_EXTRACTION_PROMPT.replace(/{ticker}/g, file.name.split('.')[0].toUpperCase()),
           userContent: [
             { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } },
-            { type: 'text', text: 'Extract all financial data from this SEC filing. Focus on income statement, balance sheet, and cash flow statement including accounts receivable, inventory, and accounts payable. Return complete JSON.' },
+            { type: 'text', text: 'Extract all financial data from this SEC filing. Focus on income statement, balance sheet, and cash flow. Return complete JSON only.' },
           ],
           maxTokens: 3000,
         });
         extracted = parseClaudeJSON(extractData);
-
       } else {
         setStep(1, `Searching SEC EDGAR for ${ticker.toUpperCase()}...`);
-
-        // Run SEC extraction and market data in parallel
         const [extractResult, marketResult] = await Promise.allSettled([
           callClaude({
             system: SEC_EXTRACTION_PROMPT.replace(/{ticker}/g, ticker.toUpperCase()),
-            userContent: `Retrieve all financial data for ticker: ${ticker.toUpperCase()}. Search for their most recent 10-K annual report. Extract income statement, balance sheet (especially accounts receivable, inventory, accounts payable), cash flow statement, and market data. Return complete JSON only.`,
+            userContent: `Retrieve all financial data for ticker: ${ticker.toUpperCase()}. Search for their most recent 10-K. Extract income statement, balance sheet, cash flow statement, and market data. Return complete JSON only.`,
             tools: [{ type: 'web_search_20250305', name: 'web_search' }],
             maxTokens: 3000,
           }),
           fetchAllMarketData(ticker.toUpperCase()),
         ]);
-
         if (extractResult.status === 'rejected') throw extractResult.reason;
         extracted = parseClaudeJSON(extractResult.value);
-
         setStep(2, 'Merging market data...');
         if (marketResult.status === 'fulfilled' && marketResult.value) {
           extracted = mergeMarketData(extracted, marketResult.value);
@@ -178,20 +172,21 @@ export function useAnalysis() {
       }
 
       setRawData(extracted);
-      setStep(3, 'Running fundamental analysis and building thesis...');
-
+      setStep(3, 'Running fundamental analysis...');
       const analysisData = await callClaude({
         system: ANALYSIS_PROMPT,
-        userContent: `Analyze this financial data. Calculate all metrics including DSO, DIO, DPO, and CCC. Score every section 1-10. Build the complete investment thesis. Return JSON only.\n\n${JSON.stringify(extracted, null, 2)}`,
+        userContent: `Analyze this data. Calculate DSO, DIO, DPO, CCC, and all other metrics. Score every section. Build the investment thesis. Return JSON only.\n\n${JSON.stringify(extracted, null, 2)}`,
         maxTokens: 5000,
       });
-
       const analysis = parseClaudeJSON(analysisData);
       setResult(analysis);
       setStep(4, 'Complete.');
-
     } catch (e) {
-      setError(e.message || 'Analysis failed. Please try again.');
+      if (e.message === 'NO_KEY') {
+        setError('NO_KEY');
+      } else {
+        setError(e.message || 'Analysis failed. Please try again.');
+      }
       setStep(0, '');
     } finally {
       setLoading(false);
