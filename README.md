@@ -48,6 +48,15 @@ npm start
 
 Alpha Vantage and FMP are optional — the app falls back to Claude web search if they're absent.
 
+### Robinhood Trading MCP (optional)
+
+This repo declares the `robinhood-trading` MCP server in `.mcp.json` at project scope, so it's available to anyone opening the project in Claude Code. It is not wired into the app itself — it's an agent-side integration, separate from the dashboard's read-only analysis. To use it:
+
+1. Open this project in Claude Code.
+2. Run `/mcp`, select `robinhood-trading`, and authenticate.
+
+Each user authenticates individually; no credentials are stored in this repo. See [Claude Code documentation](https://code.claude.com/docs/en/claude-code-on-the-web) and Robinhood's own MCP setup guide for details.
+
 ## Architecture
 
 ```
